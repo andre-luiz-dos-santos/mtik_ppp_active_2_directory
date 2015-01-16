@@ -1,0 +1,91 @@
+# coding: utf-8
+require 'optparse'
+require 'syslog'
+require 'mtik_ppp_active_2_directory'
+
+class Args
+  Error = Class.new(StandardError)
+
+  attr_reader :verbose, :retry_timeout
+
+  def initialize
+    @verbose = STDOUT.tty?
+    @retry_timeout = 15 # seconds
+  end
+
+  def self.parse
+    self.new.tap { |args| args.parse }
+  end
+
+  def parse
+    opts = OptionParser.new
+    opts.banner = 'Usage: <host> <username> <password> <dir> [options]'
+
+    opts.separator ''
+    opts.separator 'Options:'
+    opts.on('-v', '--[no-]verbose', 'Print debug messages to stdout',
+            '(default: true if stdout is a TTY)') { |v| @verbose = v }
+    opts.on('--retry-timeout SECONDS', Integer, 'Wait before restarting after an error',
+            "(default: #{@retry_timeout})") { |i| @retry_timeout = i }
+
+    opts.separator ''
+    opts.separator 'IP addresses assigned to the remote end of PPP connections will be'
+    opts.separator 'created in <dir> as a symbolic link pointing to the interface name.'
+    opts.separator ''
+
+    opts.parse!
+    ARGV.size == 4 || raise(Error, "need 4 arguments, but #{ARGV.size} provided")
+
+  rescue Error, OptionParser::ParseError => err
+    STDERR << opts << 'Error: ' << err << "\n"
+    exit(2)
+  end
+
+  def directory
+    ARGV[3]
+  end
+  
+  def mikrotik
+    Hash[[:host, :user, :pass].zip(ARGV[0, 3])]
+  end
+end
+
+class Main
+  def initialize
+    args
+    sync
+  end
+
+  def args
+    @args ||= Args.parse.tap do |args|
+      Syslog.open($PROGRAM_NAME, Syslog::LOG_PID, Syslog::LOG_DAEMON)
+      args.verbose && MtikPppActive2Directory::Log.output(&method(:info))
+    end
+  end
+
+  def sync
+    MtikPppActive2Directory.sync(args.mikrotik, args.directory)
+  rescue => err
+    err("Error: #{err}")
+    err.backtrace.each { |line| err(" #{line}") }
+    sleep(args.retry_timeout)
+    retry
+  end
+
+  # Send +message+ to syslog and STDERR.
+  # @param [String] message
+  # @return [void]
+  def err(message)
+    Syslog.err('%s', message)
+    STDERR << message << "\n" if STDERR.tty?
+  end
+
+  # Send +message+ to STDOUT.
+  # @param [String] message
+  # @return [void]
+  def info(message)
+    STDOUT << message << "\n"
+  end
+end
+
+Main.new
